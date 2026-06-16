@@ -350,6 +350,56 @@ public:
     }
 
     /**
+     * @brief Extended write function for sending handles over a pipe handle.
+     *
+     * The pipe must be initialized with `ipc == true`.
+     *
+     * `send` must *ONLY* be a TCPHandle, this function is only meant to transfer
+     * ownership of a TCPHandle to a dispatch pipe and close the handle (to free the
+     * reference held by the original thread).
+     *
+     * On Linux this is async, meaning if we get put under load we could delete the
+     * reference here before it ever gets put onto a pipe, leading to the handle being
+     * invalidated, and then it forces us to crash.
+     *
+     * This takes ownership over the data as it will transfer the handle to a
+     * different thread and clean it up afterwards.
+     *
+     * A WriteEvent event will be emitted when the data have been written.<br/>
+     * An ErrorEvent wvent will be emitted in case of errors.
+     *
+     * @param send The handle over which to write data.
+     * @param data The data to be written to the stream.
+     * @param len The lenght of the submitted data.
+     */
+    template<typename S, typename Deleter>
+    void writeAndClose(std::shared_ptr<S> send, std::unique_ptr<char[], Deleter> data, unsigned int len) {
+      auto req = this->loop().template resource<details::WriteReq<Deleter>>(std::move(data), len);
+      auto listener = [ptr = this->shared_from_this(), send](const auto &event, const auto &) {
+          send->close();
+          ptr->publish(event);
+      };
+
+      req->template once<ErrorEvent>(listener);
+      req->template once<WriteEvent>(listener);
+      req->write(this->template get<uv_stream_t>(), this->template get<uv_stream_t>(*send));
+    }
+
+    template<typename S>
+    void writeAndClose(std::shared_ptr<S> send, char *data, unsigned int len) {
+      auto req = this->loop().template resource<details::WriteReq<void(*)(char *)>>(
+          std::unique_ptr<char[], void(*)(char *)>{data, [](char *) {}}, len);
+      auto listener = [ptr = this->shared_from_this(), send](const auto &event, const auto &) {
+          send->close();
+          ptr->publish(event);
+      };
+
+      req->template once<ErrorEvent>(listener);
+      req->template once<WriteEvent>(listener);
+      req->write(this->template get<uv_stream_t>(), this->template get<uv_stream_t>(*send));
+    }
+
+    /**
      * @brief Queues a write request if it can be completed immediately.
      *
      * Same as `write()`, but won’t queue a write request if it can’t be
